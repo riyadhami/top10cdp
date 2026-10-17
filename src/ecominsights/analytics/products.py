@@ -30,6 +30,13 @@ def product_table(lines: pd.DataFrame, days: int = 90) -> pd.DataFrame:
     if "category" in lines:
         t["category"] = g["category"].first()
     t["growth"] = np.where(t["rev_previous"] > 0, t["rev_current"] / t["rev_previous"].replace(0, np.nan) - 1, np.nan)
+    # Same window a year earlier, when the data reaches back that far (removes seasonality).
+    ly_end = ref - pd.Timedelta(days=365)
+    if lines["order_date"].min() <= ly_end - pd.Timedelta(days=days):
+        ly = (lines["order_date"] > ly_end - pd.Timedelta(days=days)) & (lines["order_date"] <= ly_end)
+        t["rev_last_year"] = lines[ly].groupby("product")["line_revenue"].sum().reindex(t.index).fillna(0.0)
+        t["growth_yoy"] = np.where(t["rev_last_year"] > 0,
+                                   t["rev_current"] / t["rev_last_year"].replace(0, np.nan) - 1, np.nan)
     t = t.sort_values("revenue", ascending=False)
     t["revenue_share"] = t["revenue"] / t["revenue"].sum()
     t["cum_share"] = t["revenue_share"].cumsum()

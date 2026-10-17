@@ -25,6 +25,13 @@ def windows(ref: pd.Timestamp, days: int) -> dict[str, tuple[pd.Timestamp, pd.Ti
             "yoy": (end - d - pd.Timedelta(days=365), end - pd.Timedelta(days=365))}
 
 
+def covered(start: pd.Timestamp, first: pd.Timestamp, days: int) -> bool:
+    """Does the data reach back to `start`? Compared by calendar day, allowing up to 3% of the
+    window to be missing so a dataset beginning mid-day (or a few days late) still compares."""
+    slack = pd.Timedelta(days=max(1, round(days * 0.03)))
+    return start >= first.normalize() - slack
+
+
 def slice_period(df: pd.DataFrame, start, end, col: str = "order_date") -> pd.DataFrame:
     return df[(df[col] >= start) & (df[col] < end)]
 
@@ -69,17 +76,20 @@ def snapshot(orders: pd.DataFrame) -> dict:
     for name, days in HORIZONS.items():
         w = windows(ref, days)
         cur = metrics(slice_period(orders, *w["current"]))
-        prev = metrics(slice_period(orders, *w["previous"])) if w["previous"][0] >= first - pd.Timedelta(days=1) else None
-        yoy = metrics(slice_period(orders, *w["yoy"])) if w["yoy"][0] >= first - pd.Timedelta(days=1) else None
+        prev = metrics(slice_period(orders, *w["previous"])) if covered(w["previous"][0], first, days) else None
+        yoy = metrics(slice_period(orders, *w["yoy"])) if covered(w["yoy"][0], first, days) else None
         rows = {}
         for k, v in cur.items():
             rows[k] = {"value": v,
                        "prev": prev.get(k) if prev else None, "pop": _pct(v, prev.get(k)) if prev else None,
                        "yoy_value": yoy.get(k) if yoy else None, "yoy": _pct(v, yoy.get(k)) if yoy else None}
+        cur_rows = slice_period(orders, *w["current"])
         out[name] = {"window": [str(w["current"][0].date()), str((w["current"][1] - pd.Timedelta(days=1)).date())],
                      "metrics": rows,
-                     "tree": kpi_tree(slice_period(orders, *w["previous"]), slice_period(orders, *w["current"]))
-                     if prev else None}
+                     "tree": kpi_tree(slice_period(orders, *w["previous"]), cur_rows) if prev else None,
+                     # Same period last year removes seasonality; preferred for driver insights when available.
+                     "tree_yoy": kpi_tree(slice_period(orders, *w["yoy"]), cur_rows)
+                     if yoy and days < 365 else None}
     return out
 
 
@@ -122,11 +132,18 @@ def kpi_tree(prev: pd.DataFrame, cur: pd.DataFrame) -> dict | None:
 
 
 def attribution(orders: pd.DataFrame, lines: pd.DataFrame, days: int = 90) -> dict:
-    """Which segments explain the revenue change vs the previous period (mix-shift)."""
+    """Which segments explain the revenue change (mix-shift). Compares with the same period last
+    year when the data goes back far enough (removes seasonality), else with the previous period."""
     ref = orders["order_date"].max()
     w = windows(ref, days)
-    if w["previous"][0] < orders["order_date"].min() - pd.Timedelta(days=1):
+    first = orders["order_date"].min()
+    if covered(w["yoy"][0], first, days):
+        base_key, base_label = "yoy", "the same period last year"
+    elif covered(w["previous"][0], first, days):
+        base_key, base_label = "previous", f"the previous {days} days"
+    else:
         return {}
+    w = {"current": w["current"], "previous": w[base_key]}
     o = orders.assign(customer_type=np.where(orders["is_returning"], "Returning",
                                              np.where(orders["customer_key"].notna(), "New", "Unknown")),
                       used_discount=np.where(orders["discount"] > 0, "Discounted", "Full price"))
@@ -137,7 +154,8 @@ def attribution(orders: pd.DataFrame, lines: pd.DataFrame, days: int = 90) -> di
             dims[d] = l
     total_delta = (slice_period(orders, *w["current"])["revenue"].sum()
                    - slice_period(orders, *w["previous"])["revenue"].sum())
-    out = {"days": days, "total_delta": float(total_delta), "dimensions": {}}
+    out = {"days": days, "base": base_key, "base_label": base_label, "total_delta": float(total_delta),
+           "dimensions": {}}
     for dim, df in dims.items():
         cur = slice_period(df, *w["current"]).groupby(dim)["revenue"].sum()
         prev = slice_period(df, *w["previous"]).groupby(dim)["revenue"].sum()

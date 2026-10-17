@@ -57,17 +57,18 @@ def weekly_forecast(weekly: pd.DataFrame, fc: pd.DataFrame, cur: str = "$") -> g
     return _layout(fig, "Weekly revenue and 13-week forecast", yaxis_tickprefix=cur)
 
 
-def kpi_waterfall(tree: dict, cur: str = "$") -> go.Figure:
+def kpi_waterfall(tree: dict, cur: str = "$", title: str = "What moved revenue (last 90 days vs previous 90)",
+                  start_label: str = "Previous") -> go.Figure:
     label = {"customers": "Customers", "orders_per_customer": "Orders / customer",
              "units_per_order": "Units / order", "price_per_unit": "Price / unit", "orders": "Orders", "aov": "AOV"}
     leaves = [c for ch in tree["children"] for c in (ch.get("children") or [ch])]
-    x = ["Previous"] + [label.get(c["metric"], c["metric"]) for c in leaves] + ["Current"]
+    x = [start_label] + [label.get(c["metric"], c["metric"]) for c in leaves] + ["Current"]
     y = [tree["prev"]] + [c["contribution"] for c in leaves] + [tree["cur"]]
     fig = go.Figure(go.Waterfall(x=x, y=y, measure=["absolute"] + ["relative"] * len(leaves) + ["total"],
                                  increasing=dict(marker_color=POS), decreasing=dict(marker_color=NEG),
                                  totals=dict(marker_color=NEUTRAL), connector=dict(line=dict(color=NEUTRAL, width=1)),
                                  text=[("-" if v < 0 else "") + f"{cur}{abs(v):,.0f}" for v in y], textposition="outside"))
-    fig = _layout(fig, "What moved revenue (90 days vs previous 90)", yaxis_tickprefix=cur)
+    fig = _layout(fig, title, yaxis_tickprefix=cur)
     fig.update_layout(hovermode="closest", showlegend=False)
     return fig
 
@@ -266,8 +267,11 @@ def figure_for_insight(key: str | None, r: dict, ds=None, cur: str = "$") -> go.
     """Chart that backs a given insight (used in the Top-10 view and the report)."""
     try:
         if key == "kpi_tree":
-            tree = (r["snapshot"].get("90d") or {}).get("tree")
-            return kpi_waterfall(tree, cur) if tree else None
+            s90 = r["snapshot"].get("90d") or {}
+            if s90.get("tree_yoy"):
+                return kpi_waterfall(s90["tree_yoy"], cur, "What moved revenue (last 90 days vs same period last year)",
+                                     "Last year")
+            return kpi_waterfall(s90["tree"], cur) if s90.get("tree") else None
         if key == "segments":
             return segments_bar(r["segments"], cur)
         if key == "first_product":
@@ -305,7 +309,8 @@ def figure_for_insight(key: str | None, r: dict, ds=None, cur: str = "$") -> go.
             fig = go.Figure(go.Bar(y=rows["segment"].astype(str), x=rows["delta"], orientation="h",
                                    marker_color=[POS if v >= 0 else NEG for v in rows["delta"]],
                                    hovertemplate="%{y}: " + cur + "%{x:+,.0f}<extra></extra>"))
-            fig = _layout(fig, f"Revenue change by {dim.replace('_', ' ')} (90 days vs previous)",
+            fig = _layout(fig, f"Revenue change by {dim.replace('_', ' ')} (last 90 days vs "
+                               f"{r['attribution'].get('base_label', 'previous 90 days')})",
                           xaxis_tickprefix=cur)
             fig.update_layout(hovermode="closest")
             return _bar_style(fig)

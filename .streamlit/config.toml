@@ -1,0 +1,3 @@
+[server]
+# Matches the engine's 20 MB per-file limit (ingest.MAX_UPLOAD_BYTES).
+maxUploadSize = 20

@@ -19,6 +19,7 @@ from ecominsights.report import build_html, to_pdf
 from ecominsights.schema import FIELDS, ColumnMapping
 
 SAMPLES = Path(__file__).resolve().parent.parent / "data" / "samples"
+REAL_DEMO = Path(__file__).resolve().parent.parent / "data" / "demo" / "online_retail_ii_sample.csv"
 NONE = "— not in file —"
 
 
@@ -45,9 +46,6 @@ with st.sidebar:
                                    "Turn off to keep hashed IDs only (exports disabled).")
     st.markdown(f"**AI:** {'🟢 Azure OpenAI connected' if ai.ai_enabled() else '⚪ Not configured (rule-based mode)'}")
     st.divider()
-    if st.button("Load sample data (Shopify + Amazon + costs)", width="stretch"):
-        ss["sample"] = True
-        ss.pop("result", None)
     with st.expander("Privacy & data"):
         st.caption("Names, phones and addresses are dropped on upload. Customer IDs/emails are hashed "
                    "for analysis. Runs are deleted after the retention period.")
@@ -79,7 +77,9 @@ def mapping_editor(name: str, raw: pd.DataFrame, mapping: ColumnMapping) -> Colu
 
 
 uploads: list[tuple[str, bytes]] = []
-if ss.get("sample"):
+if ss.get("sample") == "real" and REAL_DEMO.exists():
+    uploads = [(REAL_DEMO.name, REAL_DEMO.read_bytes())]
+elif ss.get("sample") == "synthetic":
     uploads = [(p.name, p.read_bytes()) for p in (SAMPLES / "shopify_orders.csv", SAMPLES / "amazon_orders.csv",
                                                   SAMPLES / "product_costs.csv") if p.exists()]
 
@@ -92,8 +92,26 @@ if "result" not in ss:
     files = st.file_uploader("Order exports and optional product costs (CSV)", type=["csv", "tsv", "txt"],
                              accept_multiple_files=True)
     uploads += [(f.name, f.getvalue()) for f in files or []]
+    if ss.get("sample") and st.button("✕ Clear demo files"):
+        ss.pop("sample")
+        st.rerun()
+    if not uploads:
+        st.markdown("**No file handy? Try a demo:**")
+        d1, d2 = st.columns(2)
+        if REAL_DEMO.exists():
+            if d1.button("🇬🇧 Real store: UK online retailer, 2009–2011", type="primary", width="stretch",
+                         help="Public UCI Online Retail II dataset: every order of 900 real customers."):
+                ss["sample"] = "real"
+                st.rerun()
+        else:
+            d1.caption("Real-data demo not installed: run `uv run python scripts/fetch_demo_data.py`.")
+        if d2.button("☕ Synthetic: coffee shop on Shopify + Amazon, with costs", width="stretch"):
+            ss["sample"] = "synthetic"
+            st.rerun()
 
-    currency = st.selectbox("Store currency", ["Detect from file", "USD", "EUR", "GBP", "INR", "CAD", "AUD"],
+    currencies = ["Detect from file", "USD", "EUR", "GBP", "INR", "CAD", "AUD"]
+    currency = st.selectbox("Store currency", currencies, index=3 if ss.get("sample") == "real" else 0,
+                            key=f"currency_{ss.get('sample') or 'upload'}",
                             help="Used when the export has no currency column.")
     frames, cost_frames, ok = [], [], True
     for name, data in uploads:
@@ -203,11 +221,19 @@ tabs = st.tabs(["Overview", "Top 10 actions", "Customers", "Cohorts", "Products"
 
 # ---- Overview ----
 with tabs[0]:
-    horizon = st.segmented_control("Horizon", ["30d", "90d", "365d"], default="90d", key="hz") or "90d"
+    h1, h2 = st.columns(2)
+    with h1:
+        horizon = st.segmented_control("Horizon", ["30d", "90d", "365d"], default="90d", key="hz") or "90d"
     snap = r["snapshot"].get(horizon) or {}
     mm = snap.get("metrics", {})
-    st.caption(f"Window {snap.get('window', ['', ''])[0]} → {snap.get('window', ['', ''])[1]}, "
-               "compared with the previous period of the same length.")
+    has_yoy = horizon != "365d" and (mm.get("revenue") or {}).get("yoy") is not None
+    with h2:
+        options = (["Same period last year"] if has_yoy else []) + ["Previous period"]
+        base = st.segmented_control("Compare with", options, default=options[0], key=f"base_{horizon}") or options[0]
+    yoy = base == "Same period last year"
+    st.caption(f"Window {snap.get('window', ['', ''])[0]} → {snap.get('window', ['', ''])[1]}, compared with "
+               + ("the same dates last year (removes seasonality)." if yoy else
+                  "the previous period of the same length."))
     tiles = [("revenue", "Revenue", "money"), ("orders", "Orders", "int"), ("customers", "Customers", "int"),
              ("aov", "Avg order value", "money"), ("repeat_rate", "Repeat customers", "pct"),
              ("gross_margin", "Gross margin", "pct")]
@@ -216,11 +242,13 @@ with tabs[0]:
     for col, (k, label, fmt) in zip(cols, present):
         v = mm[k]["value"]
         val = m(v) if fmt == "money" else pct(v or 0) if fmt == "pct" else f"{int(v):,}"
-        d = mm[k]["pop"]
-        col.metric(label, val, f"{d * 100:+.1f}%" if d is not None else None,
-                   help=f"YoY: {mm[k]['yoy'] * 100:+.1f}%" if mm[k].get("yoy") is not None else None)
-    if snap.get("tree"):
-        show(charts.kpi_waterfall(snap["tree"], sym))
+        d = mm[k]["yoy"] if yoy else mm[k]["pop"]
+        col.metric(label, val, f"{d * 100:+.1f}%" if d is not None else None)
+    tree = snap.get("tree_yoy") if yoy else snap.get("tree")
+    if tree:
+        show(charts.kpi_waterfall(tree, sym, f"What moved revenue (last {horizon} vs "
+                                             f"{'same period last year' if yoy else 'previous period'})",
+                                  "Last year" if yoy else "Previous"))
         st.caption("Revenue = Customers × Orders/customer × Units/order × Price/unit. Bars show how much each "
                    "driver added or removed (LMDI decomposition; parts sum exactly to the change).")
     c1, c2 = st.columns(2)
@@ -230,7 +258,8 @@ with tabs[0]:
         show(charts.weekly_forecast(r["weekly"], r["forecast"], sym))
     attr = (r.get("attribution") or {}).get("dimensions") or {}
     if attr:
-        dim = st.selectbox("Explain the 90-day revenue change by", list(attr), index=0)
+        dim = st.selectbox(f"Explain the 90-day revenue change vs {r['attribution'].get('base_label', 'previous period')} by",
+                           list(attr), index=0)
         show(charts.figure_for_insight(f"attribution:{dim}", r, ds, sym))
 
 # ---- Top 10 ----

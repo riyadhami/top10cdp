@@ -94,7 +94,9 @@ def build_facts(r: dict, top_n: int = 10) -> dict:
         mm = ((r.get("snapshot") or {}).get(h) or {}).get("metrics", {})
         keep = ("revenue", "orders", "customers", "aov", "new_customers", "repeat_rate",
                 "returning_revenue_share", "discount_rate", "gross_margin")
-        return {k: {kk: (round(vv, 4) if isinstance(vv, float) else vv) for kk, vv in mm[k].items()}
+        # Ratios keep 4 decimals; money and counts are rounded to 2 so the model doesn't echo noise.
+        return {k: {kk: (round(vv, 4 if abs(vv) < 1 else 2) if isinstance(vv, float) else vv)
+                    for kk, vv in mm[k].items()}
                 for k in keep if k in mm}
     seg = r.get("segments")
     ch = r.get("channels")
@@ -123,7 +125,8 @@ def build_facts(r: dict, top_n: int = 10) -> dict:
 
 SYSTEM = (
     "You are a senior ecommerce growth analyst writing for a busy store owner. "
-    "Use ONLY the numbers in the provided facts JSON; never invent, extrapolate or recompute numbers. "
+    "Use ONLY the numbers in the provided facts JSON; never invent, extrapolate or recompute numbers, "
+    "and never add, subtract or combine numbers yourself (quote each figure separately). "
     "When you reference an insight, cite it as [id]. Be specific, plain-spoken and action-oriented."
 )
 
@@ -175,7 +178,9 @@ _NUM = re.compile(r"(?<![\w.])[-+]?[$€£₹]?\d[\d,]*(?:\.\d+)?\s?[kKmM%]?(?![
 
 
 def _parse(tok: str) -> tuple[float, bool] | None:
-    t = tok.strip().replace(",", "").lstrip("+$€£₹")
+    t = tok.strip().replace(",", "")
+    sign = -1.0 if t.startswith("-") else 1.0
+    t = t.lstrip("+-").lstrip("$€£₹")
     is_pct = t.endswith("%")
     mult = 1.0
     if t[-1:] in "kK":
@@ -184,7 +189,7 @@ def _parse(tok: str) -> tuple[float, bool] | None:
         mult, t = 1e6, t[:-1]
     t = t.rstrip("%").strip()
     try:
-        return float(t) * mult, is_pct
+        return sign * float(t) * mult, is_pct
     except ValueError:
         return None
 
@@ -207,6 +212,9 @@ def _collect(obj, out: list[float]):
                 out.append(p[0] / 100 if p[1] else p[0])
 
 
+_PERIODS = {45, 52, 60, 90, 100, 120, 180, 365}
+
+
 def verify_numbers(text: str, facts: dict) -> list[str]:
     """Numbers in `text` that don't match any number in `facts` (within rounding)."""
     known: list[float] = []
@@ -218,8 +226,9 @@ def verify_numbers(text: str, facts: dict) -> list[str]:
         if not p:
             continue
         val, is_pct = p
-        if not is_pct and float(val).is_integer() and (0 <= val <= 31 or val == 100 or 1990 <= val <= 2100):
-            continue  # small counts, week numbers, days, years
+        if not is_pct and float(val).is_integer() and (0 <= abs(val) <= 31 or abs(val) in _PERIODS
+                                                         or 1990 <= val <= 2100):
+            continue  # small counts, period lengths (e.g. "90-day", "52 weeks"), years
         target = val / 100 if is_pct else val
         tol = 0.006 if is_pct else max(abs(target) * 0.02, 0.6)
         if not any(abs(abs(k) - abs(target)) <= tol for k in known):
