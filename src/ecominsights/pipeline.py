@@ -11,6 +11,7 @@ import pandas as pd
 
 from . import benchmarks
 from .analytics import channels, cohorts, customers, kpis, products, timeseries
+from .analytics import clv as clv_model
 from .clean import Dataset
 from .insights import generate_insights
 
@@ -25,12 +26,12 @@ def _safe(fn, *args, default=None, errors: list | None = None, **kw):
         return default
 
 
-def run_analysis(ds: Dataset) -> dict:
+def run_analysis(ds: Dataset, currency: str | None = None) -> dict:
     o, l = ds.orders, ds.lines
     errs: list[str] = []
     r: dict = {"meta": {"generated_at": datetime.now().isoformat(timespec="seconds"),
                         "sources": ds.sources, "quality": ds.quality,
-                        "currency": ds.quality.get("currency") or "USD"}}
+                        "currency": currency or ds.quality.get("currency") or "USD"}}
 
     r["snapshot"] = _safe(kpis.snapshot, o, default={}, errors=errs)
     r["attribution"] = _safe(kpis.attribution, o, l, default={}, errors=errs)
@@ -38,8 +39,10 @@ def run_analysis(ds: Dataset) -> dict:
 
     cust = _safe(customers.customer_table, o, l, default=pd.DataFrame(), errors=errs)
     if len(cust) >= 20:
-        cust = customers.clv(customers.rfm(cust))
+        cust = customers.clv(customers.rfm(cust), o)
         r["customers"] = cust
+        r["clv_model"] = {"method": cust["clv_method"].iloc[0], "params": cust.attrs.get("clv_params"),
+                          "backtest": _safe(clv_model.backtest, o, default=None, errors=errs)}
         r["segments"] = _safe(customers.segment_summary, cust, default=pd.DataFrame(), errors=errs)
         r["top_lists"] = _safe(customers.top_lists, cust, default={}, errors=errs)
         r["repeat"] = _safe(customers.repeat_behavior, cust, o, default={}, errors=errs)

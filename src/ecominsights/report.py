@@ -1,4 +1,4 @@
-"""Self-contained HTML report (charts embedded via Plotly; print to PDF from the browser)."""
+"""HTML report (charts embedded via Plotly) and PDF export (the same HTML printed by headless Chromium)."""
 
 from __future__ import annotations
 
@@ -31,6 +31,14 @@ th{color:var(--ink2);font-weight:600}.narr table{margin:8px 0}
 @media print{.card{break-inside:avoid}}
 """
 
+# PDFs are always light, with page breaks between sections.
+PRINT_CSS = """
+:root{--bg:#fff;--surface:#fff;--ink:#0b0b0b;--ink2:#52514e;--muted:#6b6a66;--line:#e1e0d9;
+--accent:#2a78d6;--good:#006300;--bad:#d03b3b}
+main{max-width:none;padding:0}h2{break-after:avoid}.card{break-inside:avoid}
+.kpi{break-inside:avoid}.card.narr{break-inside:auto}.narr table,.narr tr{break-inside:avoid}.js-plotly-plot,.plotly-graph-div{break-inside:avoid}
+"""
+
 
 def _kpi_tiles(r: dict, cur: str) -> str:
     mm = ((r.get("snapshot") or {}).get("90d") or {}).get("metrics", {})
@@ -49,7 +57,8 @@ def _kpi_tiles(r: dict, cur: str) -> str:
     return '<div class="kpis">' + "".join(tiles) + "</div>"
 
 
-def build_html(r: dict, narrative: dict | None, ds=None, store_name: str = "Your store") -> str:
+def build_html(r: dict, narrative: dict | None, ds=None, store_name: str = "Your store",
+               for_print: bool = False) -> str:
     cur = r["meta"]["currency"]
     sym = {"USD": "$", "EUR": "€", "GBP": "£", "INR": "₹"}.get(cur, "")
     q = r["meta"]["quality"]
@@ -58,13 +67,18 @@ def build_html(r: dict, narrative: dict | None, ds=None, store_name: str = "Your
     def fig_html(fig):
         if fig is None:
             return ""
-        out = fig.to_html(full_html=False, include_plotlyjs="cdn" if first_fig[0] else False,
-                          config={"displayModeBar": False})
+        if for_print:
+            fig.update_layout(paper_bgcolor="#ffffff", plot_bgcolor="#ffffff", font_color="#0b0b0b")
+        # The PDF renderer may have no network, so print mode inlines plotly.js once.
+        js = (True if for_print else "cdn") if first_fig[0] else False
+        out = fig.to_html(full_html=False, include_plotlyjs=js, config={"displayModeBar": False, "staticPlot": for_print},
+                          default_width="100%" if not for_print else 900)
         first_fig[0] = False
         return out
 
     parts = [f"<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' "
-             f"content='width=device-width,initial-scale=1'><title>Growth Review</title><style>{CSS}</style>"
+             f"content='width=device-width,initial-scale=1'><title>Growth Review</title>"
+             f"<style>{CSS}{PRINT_CSS if for_print else ''}</style>"
              f"</head><body><main>",
              f"<h1>{html.escape(store_name)} — Growth Review</h1>",
              f"<div class='sub'>Data {q['date_min']} to {q['date_max']} · {q['orders']:,} orders · "
@@ -110,3 +124,28 @@ def build_html(r: dict, narrative: dict | None, ds=None, store_name: str = "Your
                  "stock-out test, robust z-score anomalies, Holt-Winters forecast). Impact estimates are directional "
                  "and use the formula shown on each card.</div></main></body></html>")
     return "\n".join(parts)
+
+
+def to_pdf(html_doc: str) -> bytes:
+    """Render the print version of the report to PDF with headless Chromium (Playwright).
+
+    One-time setup: `uv run playwright install chromium`."""
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch()
+        try:
+            page = browser.new_page(viewport={"width": 1000, "height": 1400})
+            page.emulate_media(media="print", color_scheme="light")
+            page.set_content(html_doc, wait_until="load")
+            n = html_doc.count('class="plotly-graph-div"')
+            if n:
+                page.wait_for_function(f"document.querySelectorAll('.main-svg').length >= {n}", timeout=30000)
+            return page.pdf(format="A4", print_background=True,
+                            margin={"top": "14mm", "bottom": "14mm", "left": "12mm", "right": "12mm"},
+                            display_header_footer=True, header_template="<span></span>",
+                            footer_template="<div style='font-size:8px;width:100%;text-align:center;color:#888'>"
+                                            "Growth Review · page <span class='pageNumber'></span> of "
+                                            "<span class='totalPages'></span></div>")
+        finally:
+            browser.close()

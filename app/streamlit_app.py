@@ -12,10 +12,10 @@ import streamlit as st
 
 from ecominsights import ai, charts, exports, storage
 from ecominsights.clean import build_dataset
-from ecominsights.ingest import IngestError, auto_map, read_csv, unmapped_columns
+from ecominsights.ingest import IngestError, auto_map, is_cost_file, read_csv, unmapped_columns
 from ecominsights.insights import money, pct
 from ecominsights.pipeline import run_analysis
-from ecominsights.report import build_html
+from ecominsights.report import build_html, to_pdf
 from ecominsights.schema import FIELDS, ColumnMapping
 
 SAMPLES = Path(__file__).resolve().parent.parent / "data" / "samples"
@@ -25,6 +25,7 @@ NONE = "— not in file —"
 def esc(text: str) -> str:
     """Escape '$' so Streamlit markdown doesn't render currency amounts as LaTeX."""
     return str(text).replace("$", "\\$")
+
 
 st.set_page_config(page_title="Store Growth Insights", page_icon="📈", layout="wide")
 ss = st.session_state
@@ -44,7 +45,7 @@ with st.sidebar:
                                    "Turn off to keep hashed IDs only (exports disabled).")
     st.markdown(f"**AI:** {'🟢 Azure OpenAI connected' if ai.ai_enabled() else '⚪ Not configured (rule-based mode)'}")
     st.divider()
-    if st.button("Load sample data (Shopify + Amazon)", width="stretch"):
+    if st.button("Load sample data (Shopify + Amazon + costs)", width="stretch"):
         ss["sample"] = True
         ss.pop("result", None)
     with st.expander("Privacy & data"):
@@ -79,25 +80,22 @@ def mapping_editor(name: str, raw: pd.DataFrame, mapping: ColumnMapping) -> Colu
 
 uploads: list[tuple[str, bytes]] = []
 if ss.get("sample"):
-    uploads = [(p.name, p.read_bytes()) for p in (SAMPLES / "shopify_orders.csv", SAMPLES / "amazon_orders.csv")
-               if p.exists()]
+    uploads = [(p.name, p.read_bytes()) for p in (SAMPLES / "shopify_orders.csv", SAMPLES / "amazon_orders.csv",
+                                                  SAMPLES / "product_costs.csv") if p.exists()]
 
 if "result" not in ss:
     st.title("Turn your order exports into a growth plan")
     st.write("Upload order CSVs from **Shopify, Amazon, WooCommerce** or any store (up to 20 MB each). "
-             "Add several files to compare channels. We map the columns, clean the data, run the analysis "
+             "Add several files to compare channels, and optionally a **product costs** file (SKU or product "
+             "+ unit cost) for profit analysis. We detect each file's type, map the columns, clean the data "
              "and rank the **top 10 things to do next**.")
-    files = st.file_uploader("Order exports (CSV)", type=["csv", "tsv", "txt"], accept_multiple_files=True)
+    files = st.file_uploader("Order exports and optional product costs (CSV)", type=["csv", "tsv", "txt"],
+                             accept_multiple_files=True)
     uploads += [(f.name, f.getvalue()) for f in files or []]
-    cogs_file = st.file_uploader("Optional: product costs CSV (sku or product, unit_cost) for profit analysis",
-                                 type=["csv"])
-    if ss.get("sample") and cogs_file is None and (SAMPLES / "product_costs.csv").exists():
-        cogs_df = pd.read_csv(SAMPLES / "product_costs.csv")
-        st.caption("Using sample product costs.")
-    else:
-        cogs_df = pd.read_csv(cogs_file) if cogs_file else None
 
-    frames, ok = [], True
+    currency = st.selectbox("Store currency", ["Detect from file", "USD", "EUR", "GBP", "INR", "CAD", "AUD"],
+                            help="Used when the export has no currency column.")
+    frames, cost_frames, ok = [], [], True
     for name, data in uploads:
         try:
             raw = read_csv(data)
@@ -105,10 +103,27 @@ if "result" not in ss:
             st.error(f"{name}: {e}")
             ok = False
             continue
+        detected = "Product costs" if is_cost_file(list(raw.columns)) else "Orders"
+        if detected == "Product costs":
+            with st.expander(f"**{name}** — detected **product costs**, {len(raw):,} rows"):
+                kind = st.segmented_control("File type", ["Orders", "Product costs"], default=detected,
+                                            key=f"kind_{name}") or detected
+                st.caption("Joined to order lines by SKU (or product name) to compute margins.")
+                st.dataframe(raw.head(5), hide_index=True)
+            if kind == "Product costs":
+                cost_frames.append(raw)
+                continue
         saved = storage.load_mapping(ws, list(raw.columns))
         mapping = ColumnMapping.from_dict(saved) if saved else auto_map(list(raw.columns))
-        with st.expander(f"**{name}** — detected **{mapping.platform}**, {len(raw):,} rows "
+        with st.expander(f"**{name}** — detected **{mapping.platform}** orders, {len(raw):,} rows "
                          f"{'(saved mapping)' if saved else ''}", expanded=bool(mapping.missing_required())):
+            if detected == "Orders":
+                kind = st.segmented_control("File type", ["Orders", "Product costs"], default="Orders",
+                                            key=f"kind_{name}") or "Orders"
+                if kind == "Product costs":
+                    cost_frames.append(raw)
+                    st.caption("Will be used as a product cost file.")
+                    continue
             c1, c2 = st.columns([2, 1])
             channel = c1.text_input("Channel / store label", value=mapping.platform.replace("_", " ").title(),
                                     key=f"ch_{name}")
@@ -130,6 +145,12 @@ if "result" not in ss:
                 ok = False
         frames.append((raw, mapping, channel, name))
 
+    cogs_df = pd.concat(cost_frames, ignore_index=True) if cost_frames else None
+    if uploads and not frames:
+        st.warning("Add at least one order export — product cost files alone can't be analysed.")
+    elif cost_frames:
+        st.caption(f"💰 Profit analysis on: {len(cost_frames)} product cost file(s).")
+
     if frames and st.button("Analyze", type="primary", disabled=not ok):
         with st.status("Analyzing…", expanded=True) as status:
             st.write("Cleaning and combining files…")
@@ -137,11 +158,12 @@ if "result" not in ss:
                 storage.save_mapping(ws, list(raw.columns), mapping.to_dict())
             ds = build_dataset([(r, m, c) for r, m, c, _ in frames], cogs=cogs_df, keep_contacts=keep_contacts)
             st.write(f"{ds.quality['orders']:,} orders, {ds.quality['customers']:,} customers. Running analytics…")
-            result = run_analysis(ds)
+            result = run_analysis(ds, currency=None if currency == "Detect from file" else currency)
             st.write("Saving run…")
             run_id = storage.save_run(ws, ds, result, label=", ".join(n for *_, n in frames))
             ss.update(result=result, ds=ds, run_id=run_id)
             ss.pop("narrative", None)
+            ss.pop("pdf", None)
             status.update(label="Done", state="complete")
         st.rerun()
     st.stop()
@@ -151,7 +173,7 @@ if "result" not in ss:
 
 r, ds = ss["result"], ss["ds"]
 cur = r["meta"]["currency"]
-sym = {"USD": "$", "EUR": "€", "GBP": "£", "INR": "₹"}.get(cur, "")
+sym = {"USD": "$", "EUR": "€", "GBP": "£", "INR": "₹", "CAD": "C$", "AUD": "A$"}.get(cur, "")
 q = r["meta"]["quality"]
 m = lambda x: money(x, cur)
 
@@ -170,7 +192,7 @@ head[0].title("Growth review")
 head[0].caption(f"{q['date_min']} → {q['date_max']} · {q['orders']:,} orders · {q['customers']:,} customers · "
                 f"channels: {', '.join(s['channel'] for s in r['meta']['sources'])} · data quality {q['score']}/100")
 if head[1].button("↺ New upload"):
-    for k in ("result", "ds", "narrative", "sample", "run_id"):
+    for k in ("result", "ds", "narrative", "sample", "run_id", "pdf"):
         ss.pop(k, None)
     st.rerun()
 if r["meta"].get("module_errors"):
@@ -246,6 +268,25 @@ with tabs[2]:
         c[1].metric("Repeat customer rate", pct(rep.get("repeat_customer_rate") or 0))
         c[2].metric("Median days to 2nd order", f"{rep.get('median_days_to_second_order') or 0:.0f}")
         c[3].metric("Revenue from top 20%", pct(rep.get("top20_revenue_share") or 0))
+        cm = r.get("clv_model") or {}
+        bt = cm.get("backtest")
+        with st.expander("How reliable are the customer value predictions?"):
+            if cm.get("method") == "bg_nbd_gamma_gamma":
+                st.markdown("Predicted 12-month value uses **BG/NBD** (how often each customer buys and the "
+                            "chance they're still active) × **Gamma-Gamma** (how much they spend per order).")
+            else:
+                st.markdown("Not enough repeat buyers to fit the statistical model; using a recency-based heuristic.")
+            if bt:
+                c1, c2, c3 = st.columns(3)
+                c1.metric(f"Predicted orders (last {bt['holdout_days']}d, held out)", f"{bt['predicted_total']:,.0f}")
+                c2.metric("Actual orders", f"{bt['actual_total']:,.0f}",
+                          f"{bt['total_error'] * 100:+.0f}% error" if bt.get("total_error") is not None else None,
+                          delta_color="off")
+                c3.metric("Per-customer correlation", f"{bt['correlation']:.2f}" if bt.get("correlation") else "—")
+                weak = abs(bt.get("total_error") or 0) > 0.3 or (bt.get("correlation") or 0) < 0.5
+                (st.warning if weak else st.success)(
+                    "Backtest is weak: treat predicted values as rough rankings, not forecasts." if weak else
+                    "Backtest is good: predictions tracked actual repeat orders in the held-out period.")
         show(charts.segments_bar(r["segments"], sym))
         st.dataframe(r["segments"], hide_index=True, column_config={
             "revenue": st.column_config.NumberColumn(format="%.0f"),
@@ -373,6 +414,7 @@ with tabs[7]:
     c1.caption(f"Written by {'Azure OpenAI from the computed facts only' if n['source'] != 'rules' else 'rules (AI not configured)'}.")
     if c2.button("Regenerate"):
         ss.pop("narrative")
+        ss.pop("pdf", None)
         st.rerun()
     if n.get("error"):
         st.warning(f"AI call failed, showing rule-based review: {n['error']}")
@@ -380,10 +422,18 @@ with tabs[7]:
         st.warning(esc("These numbers could not be matched to the computed facts — double-check them: "
                        + ", ".join(n["unverified_numbers"])))
     st.markdown(esc(n["markdown"]))
-    html_report = build_html(r, n, ds)
-    st.download_button("⬇️ Download full report (HTML — open and print to PDF)", html_report.encode(),
-                       file_name="growth_review.html", mime="text/html", type="primary")
-    st.download_button("⬇️ Download review (Markdown)", n["markdown"].encode(), file_name="REVIEW.md")
+    d1, d2, d3 = st.columns(3)
+    if d1.button("📄 Prepare PDF report", type="primary"):
+        with st.spinner("Rendering PDF…"):
+            try:
+                ss["pdf"] = to_pdf(build_html(r, n, ds, for_print=True))
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"PDF rendering failed ({exc}). Run `uv run playwright install chromium` once.")
+    if ss.get("pdf"):
+        d1.download_button("⬇️ Download PDF", ss["pdf"], file_name="growth_review.pdf", mime="application/pdf")
+    d2.download_button("⬇️ Interactive report (HTML)", build_html(r, n, ds).encode(),
+                       file_name="growth_review.html", mime="text/html")
+    d3.download_button("⬇️ Review (Markdown)", n["markdown"].encode(), file_name="REVIEW.md")
     st.divider()
     st.subheader("Ask about your data")
     if not ai.ai_enabled():

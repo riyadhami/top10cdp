@@ -55,7 +55,7 @@ SYNONYMS: dict[str, list[str]] = {
     "discount_code": ["discountcode", "couponcode", "coupon", "promocode", "promotionids"],
     "product": ["lineitemname", "productname", "itemname", "description", "product", "title",
                 "producttitle"],
-    "sku": ["lineitemsku", "sku", "stockcode", "productid", "asin", "itemsku", "productcode"],
+    "sku": ["lineitemsku", "sku", "variantsku", "stockcode", "productid", "asin", "itemsku", "productcode"],
     "category": ["producttype", "category", "productcategory", "type"],
     "quantity": ["lineitemquantity", "quantity", "qty", "quantitypurchased", "units", "itemquantity"],
     "unit_price": ["lineitemprice", "itemprice", "unitprice", "price", "priceeach"],

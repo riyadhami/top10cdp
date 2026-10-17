@@ -85,41 +85,51 @@ def basket_pairs(lines: pd.DataFrame, min_pair_orders: int = 8, max_products: in
 
 
 def stockouts(lines: pd.DataFrame, top_n: int = 30, min_gap_days: int = 10,
-              min_expected_sales_days: float = 6.0) -> pd.DataFrame:
+              min_expected_sales_days: float = 8.0, min_history: int = 30) -> pd.DataFrame:
     """Zero-sales runs that are very unlikely given the product's local selling rate.
 
-    For each gap, the local rate is the share of days with a sale in the 60 days around it.
-    Under a Poisson model P(no sale for g days) = exp(-rate * g); we flag gaps where the
-    expected number of selling days is >= 6 (p < 0.25%)."""
+    Time is measured in *open days* (days the store had any order), so closures, weekends off
+    and holidays don't count. The local rate is the share of open days with a sale in the 60 open
+    days before the gap and (if it ended) the 60 after, taking the slower side so seasonal items
+    going out of season don't trigger. Under a Poisson model P(no sale) = exp(-rate * gap); we
+    flag gaps where the expected number of selling days is >= 8 (p < 0.04%, strict because many
+    products and gaps are tested). Each side needs >= 30 open days of history."""
     if "product" not in lines:
         return pd.DataFrame()
-    ref = lines["order_date"].max().normalize()
+    open_days = np.array(sorted(lines["order_date"].dt.normalize().unique()))
+    n_open = len(open_days)
+    pos = {d: k for k, d in enumerate(open_days)}
+    ref_k = n_open - 1
     top = lines.groupby("product")["line_revenue"].sum().nlargest(top_n).index
     rows = []
     for p in top:
         pl = lines[lines["product"] == p]
-        d = pl["order_date"].dt.normalize().drop_duplicates().sort_values().reset_index(drop=True)
-        if len(d) < 20:
+        days = np.array(sorted(pl["order_date"].dt.normalize().unique()))
+        if len(days) < 20:
             continue
-        rev_by_day = pl.groupby(pl["order_date"].dt.normalize())["line_revenue"].sum()
-        ends = list(zip(d.iloc[:-1], d.iloc[1:])) + [(d.iloc[-1], ref + pd.Timedelta(days=1))]
-        for start, end in ends:
-            g = (end - start).days - 1
+        k = np.array([pos[d] for d in days])
+        rev_per_open_day = pl["line_revenue"].sum() / max(k[-1] - k[0] + 1, 1)
+        gaps = list(zip(k[:-1], k[1:])) + [(k[-1], ref_k + 1)]
+        for a, b in gaps:
+            g = b - a - 1  # open days without a sale
             if g < min_gap_days:
                 continue
-            ongoing = end > ref
-            lo, hi = start - pd.Timedelta(days=60), end + pd.Timedelta(days=60)
-            window = d[((d > lo) & (d <= start)) | ((d >= end) & (d < hi))]
-            window_days = 60 + (0 if ongoing else min(60, (ref - end).days + 1))
-            rate = len(window) / max(window_days, 1)
+            ongoing = b > ref_k
+            if a + 1 < min_history or (not ongoing and ref_k - b + 1 < min_history):
+                continue
+            rate = ((k > a - 60) & (k <= a)).sum() / min(60, a + 1)
+            if not ongoing:
+                after_n = min(60, ref_k - b + 1)
+                rate = min(rate, ((k >= b) & (k < b + 60)).sum() / after_n)
             if rate * g < min_expected_sales_days:
                 continue
-            local = rev_by_day[(rev_by_day.index > lo) & (rev_by_day.index < hi)].sum() / max(window_days, 1)
-            rows.append({"product": p, "gap_start": (start + pd.Timedelta(days=1)).date(),
-                         "gap_end": (min(end, ref) - pd.Timedelta(days=0 if ongoing else 1)).date(),
-                         "gap_days": g, "expected_sales_days": round(rate * g, 1),
+            g_start = pd.Timestamp(open_days[a + 1])
+            g_end = pd.Timestamp(open_days[min(b - 1, ref_k)])
+            rows.append({"product": p, "gap_start": g_start.date(), "gap_end": g_end.date(),
+                         "gap_days": int((g_end - g_start).days + 1), "open_days_without_sale": int(g),
+                         "expected_sales_days": round(float(rate * g), 1),
                          "typical_gap_days": round(1 / rate, 1) if rate else None,
-                         "ongoing": bool(ongoing), "est_lost_revenue": float(local * g)})
+                         "ongoing": bool(ongoing), "est_lost_revenue": float(rev_per_open_day * g)})
     return pd.DataFrame(rows).sort_values("est_lost_revenue", ascending=False) if rows else pd.DataFrame()
 
 

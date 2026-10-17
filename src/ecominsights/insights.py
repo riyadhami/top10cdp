@@ -238,9 +238,10 @@ def generate_insights(r: dict, top_n: int = 10) -> list[dict]:
             0.7, 3, 2, {"stockouts": so.head(5).to_dict("records")}, "stockouts"))
 
     if not ptab.empty:
-        dec = ptab[ptab["abc"].isin(["A", "B"]) & (ptab["growth"] < -0.3) & (ptab["rev_previous"] > 0)]
+        dec = ptab[ptab["abc"].isin(["A", "B"]) & (ptab["growth"] < -0.3)
+                   & (ptab["rev_previous"] >= 0.01 * ptab["rev_previous"].sum())]
         if len(dec):
-            d = dec.sort_values("growth").iloc[0]
+            d = dec.assign(lost=dec["rev_previous"] - dec["rev_current"]).sort_values("lost", ascending=False).iloc[0]
             out.append(Insight(
                 f"declining_{d['product']}", "products", "risk",
                 f"Key product '{d['product']}' is declining fast",
@@ -383,7 +384,8 @@ def generate_insights(r: dict, top_n: int = 10) -> list[dict]:
             f"Next 13 weeks forecast: {m(nxt)} ({'+' if nxt >= last else ''}{pct(nxt / last - 1)} vs last 13)",
             f"Holt-Winters forecast on weekly revenue; 80% interval {m(fc['lower'].sum())} - {m(fc['upper'].sum())}.",
             "Use it to set inventory and cash plans; investigate if actuals fall below the lower band.",
-            abs(nxt - last) * 0.1, "|forecast change| x 10% (planning value)", 0.5, 1, 1, {}, "forecast"))
+            abs(nxt - last) * 0.02, "|forecast change| x 2% (planning value; informational)", 0.5, 1, 2, {},
+            "forecast"))
 
     for i in out:
         i.impact = float(max(i.impact, 0.0)) if np.isfinite(i.impact) else 0.0

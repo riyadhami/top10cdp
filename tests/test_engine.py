@@ -98,3 +98,51 @@ def test_rule_narrative_and_number_verification(sample_result):
     facts = build_facts(r)
     assert verify_numbers("Revenue grew to $999,999,999 this year.", facts) == ["$999,999,999"]
     assert verify_numbers(md, facts) == []
+
+
+def test_online_retail_returns_and_non_merch_lines():
+    raw = pd.DataFrame({
+        "Invoice": ["100", "100", "100", "101", "C200"],
+        "StockCode": ["85123A", "22423", "POST", "85123A", "22423"],
+        "Description": ["HEART HOLDER", "CAKESTAND", "POSTAGE", "HEART HOLDER", "CAKESTAND"],
+        "Quantity": ["6", "74215", "1", "2", "-74215"],
+        "InvoiceDate": ["2011-01-18 10:00", "2011-01-18 10:00", "2011-01-18 10:00", "2011-01-20 09:00",
+                        "2011-01-18 10:05"],
+        "Price": ["2.55", "1.04", "18.00", "2.55", "1.04"],
+        "Customer ID": ["12346", "12346", "12346", "12346", "12346"],
+        "Country": ["United Kingdom"] * 5,
+    })
+    m = auto_map(list(raw.columns))
+    assert m.platform == "online_retail"
+    ds = build_dataset([(raw, m, None)])
+    o = ds.orders.set_index("order_id")
+    # The cancelled 74,215-unit line and the postage line are excluded from revenue.
+    assert math.isclose(o.loc["100", "revenue"], 6 * 2.55)
+    assert ds.quality["stats"]["returns_matched"] == 1
+    assert ds.quality["stats"]["non_merch_lines"] == 1
+    assert set(ds.lines["product"]) == {"HEART HOLDER"}
+
+
+def test_bgnbd_recovers_simulated_behaviour():
+    import numpy as np
+    from ecominsights.analytics.clv import expected_purchases, fit_bgnbd
+    rng = np.random.default_rng(0)
+    r, alpha, a, b, T, H = 0.243, 4.414, 0.793, 2.426, 39.0, 39.0
+    rows = []
+    for _ in range(3000):
+        lam, p = rng.gamma(r, 1 / alpha), rng.beta(a, b)
+        t, times = 0.0, []
+        while True:
+            t += rng.exponential(1 / lam)
+            if t > T + H:
+                break
+            times.append(t)
+            if rng.uniform() < p:
+                break
+        cal = [x for x in times if x <= T]
+        rows.append((len(cal), max(cal) if cal else 0.0, len(times) - len(cal)))
+    df = pd.DataFrame(rows, columns=["x", "t_x", "hold"]).assign(T=T)
+    fit = fit_bgnbd(df)
+    assert abs(fit["r"] - r) < 0.08 and abs(fit["alpha"] - alpha) < 1.5
+    pred = expected_purchases(fit, H, df.x.values, df.t_x.values, df["T"].values).sum()
+    assert abs(pred / df.hold.sum() - 1) < 0.2

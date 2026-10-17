@@ -1,58 +1,53 @@
-# Store Growth Insights (MVP)
+# Store Growth Insights
 
-Upload ecommerce order exports (Shopify, Amazon, WooCommerce, Online Retail or any CSV) and get a
-ranked **Top 10 action list**, customer segments, cohorts, product and channel analytics, an
-AI-written review, and audience exports.
+**Upload your store's order exports. Get back the 10 things most likely to grow your sales.**
 
-**Principle: math decides, AI explains.** Every number is computed deterministically in Python.
-Azure OpenAI only maps messy columns, writes the narrative from a facts JSON, and answers questions,
-and every number it writes is checked against those facts.
+Store Growth Insights reads the sales files you already have, from Shopify, Amazon, WooCommerce or
+any online store. It finds what is driving or holding back your revenue and turns that into a
+short, ranked list of actions, each with an estimated dollar value.
 
-## Run
+## What you upload
 
-```bash
-uv sync
-uv run python scripts/make_sample_data.py      # sample Shopify + Amazon + COGS files
-uv run streamlit run app/streamlit_app.py      # UI  -> http://localhost:8501
-uv run uvicorn api.main:app --port 8000        # API -> http://localhost:8000/docs
-uv run pytest -q
-```
+- **Order exports**: one or more CSV files. Add one file per store or channel to compare them.
+- **Product costs** (optional): a list of products with their unit cost. This unlocks profit and
+  margin analysis.
 
-Copy `.env.example` to `.env` and fill in the `AZURE_OPENAI_*` settings to enable AI. Without them
-the app runs in rule-based mode.
+Put everything in one upload box. The app works out which file is which and how its columns are
+laid out.
 
-## Pipeline
+## What you get
 
-```
-CSV(s) ─► ingest.py      sniff encoding/delimiter, detect platform, map headers (exact → fuzzy → AI)
-       ─► clean.py       dedupe line items → orders, cancellations/returns/test orders, money/date parsing,
-                         hash customer IDs, drop PII columns, join COGS, data-quality score
-       ─► analytics/     kpis (30/90/365d, KPI tree with LMDI, mix-shift attribution)
-                         customers (RFM segments, CLV/churn heuristic, top-10 lists)
-                         cohorts (retention, LTV curve, first-product & discount cohorts + z-test)
-                         products (ABC/Pareto, momentum, basket lift, margin, Poisson stock-out test,
-                                   replenishment cadence, returns)
-                         timeseries (seasonality, weekday×hour, robust-z anomalies, Holt-Winters forecast)
-                         channels (multi-store comparison)
-       ─► insights.py    candidates with $ impact formula + confidence → score = impact×conf×action/effort
-       ─► ai.py          Azure OpenAI narrative / Q&A on facts only, with number verification
-       ─► report.py      HTML report · exports.py audience CSVs · storage.py runs, history, retention
-```
+- **Your top 10 priorities**: specific actions ranked by expected impact, each with what was
+  found, what to do and how much it could be worth.
+- **How the business is doing**: revenue, orders, customers and order value over the last 30, 90
+  and 365 days, and what moved them.
+- **Your customers**: who your best customers are, who is about to slip away, who to win back,
+  and how much each is likely to spend in the next year.
+- **Your products**: best-sellers, rising and falling items, products bought together, likely
+  stock-outs and when customers are due to reorder.
+- **Timing**: your busiest days and hours, seasonal peaks and a 13-week sales forecast.
+- **Channels**: how your stores or marketplaces compare.
+- **A written review**: a plain-English summary and 30-day action plan, plus a chat where you can
+  ask questions about your results.
+- **Reports and lists**: a PDF report to share, and customer lists ready for Klaviyo, Mailchimp,
+  Meta or Google Ads.
 
-## Add-ons included
+Upload again later and the app shows what changed since last time.
 
-1. Profit: upload a cost file (sku/product, unit_cost) to get margin by product, channel and order.
-3. Audience exports: Klaviyo, Mailchimp, Meta and Google (hashed) CSVs per segment.
-5. Data-quality score, listing which analyses each gap blocks.
-6. Re-upload history: KPI deltas, new and resolved priorities, segment migration matrix.
-7. Multi-channel: upload several files with a channel label each.
-8. Indicative DTC benchmarks (edit `src/ecominsights/benchmarks.py`).
-9. Privacy: PII columns dropped, salted hashes for IDs, emails kept only with opt-in and never sent
-   to AI, delete-workspace control, `RETENTION_DAYS` purge.
+## Why you can trust the numbers
 
-## Next phases
+Every figure is calculated directly from your data using standard, proven methods. The AI only
+writes the explanation, and the app checks every number it writes against the calculated results.
+Each recommendation shows how its value was estimated, so you can judge it yourself.
 
-- Replace the CLV heuristic with BG/NBD + Gamma-Gamma.
-- PDF export (static chart images).
-- Auth and multi-tenant storage (Postgres + object storage) for the self-serve SaaS.
-- Background jobs, scheduled digests, Shopify/Amazon API connectors.
+## Your data
+
+- Names, phone numbers and addresses are removed as soon as a file is uploaded.
+- Customers are identified by scrambled codes, not by their details.
+- Email addresses are kept only if you choose to, and only for creating customer lists.
+- The AI never sees your order records, only summary results.
+- You can delete all your data at any time.
+
+---
+
+For how it works under the hood, and how to run it, see [ARCHITECTURE.md](ARCHITECTURE.md).

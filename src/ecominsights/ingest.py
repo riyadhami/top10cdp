@@ -118,3 +118,13 @@ def unmapped_columns(columns: list[str], mapping: ColumnMapping) -> list[str]:
 
 def field_choices() -> list[str]:
     return list(FIELDS)
+
+
+def is_cost_file(columns: list[str]) -> bool:
+    """A product-cost file has a cost column and a SKU/product key, but no order date or price."""
+    m = auto_map(columns)
+    has_key = "sku" in m.fields or "product" in m.fields or any(
+        normalize_header(c) in ("name", "productname", "item", "itemname") for c in columns)
+    return ("unit_cost" in m.fields and has_key and "order_date" not in m.fields
+            and "quantity" not in m.fields)
+

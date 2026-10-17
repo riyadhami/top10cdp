@@ -3,10 +3,9 @@
 RFM: Recency (days since last order), Frequency (orders), Monetary (revenue), each scored 1-5
 by quintile rank. Segments follow the widely used 11-segment R x FM grid.
 
-CLV (heuristic, phase-1): P(active) = exp(-recency / expected_gap), where expected_gap is the
-customer's mean inter-purchase gap (or the store median for one-time buyers);
-predicted_12m = P(active) * expected orders per year * customer AOV.
-(BG/NBD + Gamma-Gamma replaces this in a later phase.)
+CLV: BG/NBD + Gamma-Gamma (see clv.py). If the model can't be fitted (too few customers or
+repeat buyers), a heuristic is used: P(active) = exp(-recency / (2 x expected gap)) and
+predicted_12m = P(active) x expected orders per year x customer AOV.
 """
 
 from __future__ import annotations
@@ -107,8 +106,22 @@ def rfm(customers: pd.DataFrame) -> pd.DataFrame:
     return c
 
 
-def clv(customers: pd.DataFrame) -> pd.DataFrame:
+def clv(customers: pd.DataFrame, orders: pd.DataFrame | None = None) -> pd.DataFrame:
+    """BG/NBD + Gamma-Gamma when it can be fitted, else the recency/gap heuristic."""
     c = customers.copy()
+    if orders is not None:
+        from . import clv as clv_model
+        try:
+            fitted = clv_model.predict(orders)
+        except Exception:  # noqa: BLE001
+            fitted = None
+        if fitted is not None:
+            pred, params = fitted
+            c = c.join(pred, how="left")
+            c["churn_risk"] = 1 - c["p_active"]
+            c["clv_method"] = "bg_nbd_gamma_gamma"
+            c.attrs["clv_params"] = params
+            return c
     store_gap = c["avg_gap_days"].median()
     if not np.isfinite(store_gap):
         store_gap = 90.0
@@ -118,6 +131,7 @@ def clv(customers: pd.DataFrame) -> pd.DataFrame:
     orders_per_year = (365 / gap).clip(upper=24)
     c["predicted_12m_value"] = c["p_active"] * orders_per_year * c["aov"]
     c["churn_risk"] = 1 - c["p_active"]
+    c["clv_method"] = "heuristic"
     return c
 
 
@@ -134,7 +148,7 @@ def segment_summary(c: pd.DataFrame) -> pd.DataFrame:
 
 def top_lists(c: pd.DataFrame, n: int = 10) -> dict[str, pd.DataFrame]:
     cols = [x for x in ("segment", "orders", "revenue", "aov", "recency_days", "predicted_12m_value",
-                        "p_active", "favorite_product", "country") if x in c]
+                        "expected_orders_12m", "p_active", "favorite_product", "country") if x in c]
     vip = c.sort_values("predicted_12m_value", ascending=False)
     at_risk = c[c["segment"].isin(["At Risk", "Can't Lose Them", "About to Sleep"])].sort_values(
         "revenue", ascending=False)
