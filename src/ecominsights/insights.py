@@ -72,19 +72,29 @@ def generate_insights(r: dict, top_n: int = 10) -> list[dict]:
     cust = _df(r, "customers")
     rep = r.get("repeat") or {}
 
-    # ---- Revenue drivers (KPI tree, 90d) ----
-    tree = (snap.get("90d") or {}).get("tree")
+    # ---- Revenue drivers (KPI tree, 90d; vs same period last year when available) ----
+    s90 = snap.get("90d") or {}
+    tree = s90.get("tree_yoy") or s90.get("tree")
+    base = "the same 90 days last year" if s90.get("tree_yoy") else "the previous 90 days"
     if tree:
         leaves = [c for ch in tree["children"] for c in (ch.get("children") or [ch])]
         worst = min(leaves, key=lambda x: x["contribution"])
         best = max(leaves, key=lambda x: x["contribution"])
         label = {"customers": "active customers", "orders_per_customer": "orders per customer",
                  "units_per_order": "units per order", "price_per_unit": "average price per unit"}
+        drag_title = {"customers": "Fewer active customers are the biggest drag on revenue",
+                      "orders_per_customer": "Customers ordering less often is the biggest drag on revenue",
+                      "units_per_order": "Smaller baskets are the biggest drag on revenue",
+                      "price_per_unit": "Lower prices per item are the biggest drag on revenue"}
+        win_title = {"customers": "Growth is coming from more active customers",
+                     "orders_per_customer": "Growth is coming from customers ordering more often",
+                     "units_per_order": "Growth is coming from bigger baskets",
+                     "price_per_unit": "Growth is coming from higher prices per item"}
         if worst["contribution"] < -0.02 * tree["prev"]:
             out.append(Insight(
                 "driver_down", "revenue", "risk",
-                f"{label.get(worst['metric'], worst['metric']).capitalize()} is the biggest drag on revenue",
-                f"Revenue moved {pct(tree['change'] or 0, 1)} vs the previous 90 days ({m(tree['contribution'])}). "
+                drag_title.get(worst["metric"], f"{worst['metric']} is the biggest drag on revenue"),
+                f"Last-90-day revenue moved {pct(tree['change'] or 0, 1)} vs {base} ({m(tree['contribution'])}). "
                 f"The KPI tree attributes {m(worst['contribution'])} to {label.get(worst['metric'])} "
                 f"({pct(worst['change'] or 0, 1)}).",
                 {"customers": "Fix acquisition: check paid traffic, conversion rate and top landing pages.",
@@ -97,30 +107,44 @@ def generate_insights(r: dict, top_n: int = 10) -> list[dict]:
         if best["contribution"] > 0.05 * tree["prev"]:
             out.append(Insight(
                 "driver_up", "revenue", "win",
-                f"Growth is coming from {label.get(best['metric'], best['metric'])}",
+                win_title.get(best["metric"], f"Growth is coming from {best['metric']}"),
                 f"{label.get(best['metric']).capitalize()} changed {pct(best['change'] or 0, 1)}, adding "
-                f"{m(best['contribution'])} over the last 90 days vs the prior 90.",
+                f"{m(best['contribution'])} over the last 90 days vs {base}.",
                 "Double down on what drove it and protect it (inventory, budget, messaging).",
                 best["contribution"] * 4 * 0.2, "90-day contribution x 4 x 20% further upside",
                 size_confidence(m90.get("orders", {}).get("value", 0), 200), 2, 2, {"tree": tree}, "kpi_tree"))
 
     # ---- Mix-shift attribution ----
     attr = r.get("attribution") or {}
+    # Only segments that explain the change better than the total does: skip a dropping segment
+    # that is >= 80% of the base (it just restates the total), keep the 2 largest drops.
+    drops = []
     for dim, rows in (attr.get("dimensions") or {}).items():
-        if dim == "product" or not rows:
+        if dim == "product" or len(rows) < 2:
             continue
+        base_total = sum(x["previous"] for x in rows) or 1
         worst = rows[0]
-        prev_total = sum(x["previous"] for x in rows) or 1
-        if worst["delta"] < -0.05 * prev_total and worst["previous"] > 0:
-            out.append(Insight(
-                f"segment_drop_{dim}", "revenue", "risk",
-                f"{dim.replace('_', ' ').title()} '{worst['segment']}' lost {m(-worst['delta'])} in 90 days",
-                f"Revenue from {worst['segment']} fell {pct(-(worst['pct_change'] or 0))} vs the prior 90 days "
-                f"({m(worst['previous'])} -> {m(worst['current'])}).",
-                f"Investigate {worst['segment']}: traffic, pricing, stock and campaign changes in that segment.",
-                -worst["delta"] * 4 * 0.3, "|90-day segment drop| x 4 x 30% recoverable",
-                size_confidence(worst["previous"] / max(m90.get("aov", {}).get("value") or 1, 1), 60), 2, 2,
-                {"dimension": dim, "segment": worst}, f"attribution:{dim}"))
+        if worst["previous"] >= 0.8 * base_total:
+            continue
+        if worst["delta"] < -0.05 * base_total and worst["previous"] > 0:
+            drops.append((dim, worst))
+    seg_label = {"customer_type": "customers", "used_discount": "orders", "channel": "channel",
+                 "country": "country", "category": "category"}
+    for dim, worst in sorted(drops, key=lambda d: d[1]["delta"])[:2]:
+        name = f"{worst['segment']} {seg_label.get(dim, dim.replace('_', ' '))}"
+        out.append(Insight(
+            f"segment_drop_{dim}", "revenue", "risk",
+            f"Revenue from {name} is down {m(-worst['delta'])}",
+            f"Over the last 90 days, revenue from {name} fell {pct(-(worst['pct_change'] or 0))} vs "
+            f"{attr.get('base_label', 'the previous 90 days')} ({m(worst['previous'])} -> {m(worst['current'])}), "
+            f"against a total change of {m(attr.get('total_delta', 0))}.",
+            {"customer_type": "Check acquisition: ad spend and reach, conversion rate, and the first-order "
+                              "offer; compare traffic sources with last year." if worst["segment"] == "New" else
+                              "Re-engage existing customers: post-purchase, replenishment and win-back flows."}
+            .get(dim, f"Investigate {worst['segment']}: traffic, pricing, stock and campaign changes."),
+            -worst["delta"] * 4 * 0.3, "|90-day segment drop| x 4 x 30% recoverable",
+            size_confidence(worst["previous"] / max(m90.get("aov", {}).get("value") or 1, 1), 60), 2, 2,
+            {"dimension": dim, "segment": worst}, f"attribution:{dim}"))
 
     # ---- Customers ----
     if not cust.empty:
@@ -238,25 +262,29 @@ def generate_insights(r: dict, top_n: int = 10) -> list[dict]:
             0.7, 3, 2, {"stockouts": so.head(5).to_dict("records")}, "stockouts"))
 
     if not ptab.empty:
-        dec = ptab[ptab["abc"].isin(["A", "B"]) & (ptab["growth"] < -0.3)
-                   & (ptab["rev_previous"] >= 0.01 * ptab["rev_previous"].sum())]
+        # Compare with the same 90 days last year when possible, so seasonal products don't trigger.
+        yoy = "growth_yoy" in ptab
+        g_col, b_col = ("growth_yoy", "rev_last_year") if yoy else ("growth", "rev_previous")
+        b_label = "the same 90 days last year" if yoy else "the prior 90 days"
+        dec = ptab[ptab["abc"].isin(["A", "B"]) & (ptab[g_col] < -0.3)
+                   & (ptab[b_col] >= 0.01 * ptab[b_col].sum())]
         if len(dec):
-            d = dec.assign(lost=dec["rev_previous"] - dec["rev_current"]).sort_values("lost", ascending=False).iloc[0]
+            d = dec.assign(lost=dec[b_col] - dec["rev_current"]).sort_values("lost", ascending=False).iloc[0]
             out.append(Insight(
                 f"declining_{d['product']}", "products", "risk",
                 f"Key product '{d['product']}' is declining fast",
-                f"{d['product']} revenue fell {pct(-d['growth'])} in the last 90 days vs the prior 90 "
-                f"({m(d['rev_previous'])} -> {m(d['rev_current'])}).",
+                f"{d['product']} revenue fell {pct(-d[g_col])} in the last 90 days vs {b_label} "
+                f"({m(d[b_col])} -> {m(d['rev_current'])}).",
                 "Check stock, price changes, reviews and competitor pricing; refresh creative or retire it.",
-                (d["rev_previous"] - d["rev_current"]) * 4 * 0.4, "90-day drop x 4 x 40% recoverable",
+                (d[b_col] - d["rev_current"]) * 4 * 0.4, "90-day drop x 4 x 40% recoverable",
                 size_confidence(d["orders"], 60), 2, 2, {"product": d.to_dict()}, "product_momentum"))
-        rising = ptab[(ptab["growth"] > 0.5) & (ptab["rev_current"] > 0.02 * ptab["rev_current"].sum())]
+        rising = ptab[(ptab[g_col] > 0.5) & (ptab["rev_current"] > 0.02 * ptab["rev_current"].sum())]
         if len(rising):
-            u = rising.sort_values("growth", ascending=False).iloc[0]
+            u = rising.sort_values(g_col, ascending=False).iloc[0]
             out.append(Insight(
                 f"rising_{u['product']}", "products", "win",
                 f"'{u['product']}' is breaking out",
-                f"{u['product']} grew {pct(u['growth'])} vs the prior 90 days to {m(u['rev_current'])}.",
+                f"{u['product']} grew {pct(u[g_col])} vs {b_label} to {m(u['rev_current'])}.",
                 "Secure inventory, feature it on the homepage and in ads.",
                 u["rev_current"] * 4 * 0.2, "current 90-day revenue x 4 x 20% upside",
                 size_confidence(u["orders"], 60), 2, 1, {"product": u.to_dict()}, "product_momentum"))
@@ -378,10 +406,17 @@ def generate_insights(r: dict, top_n: int = 10) -> list[dict]:
     fc = _df(r, "forecast")
     wk = _df(r, "weekly")
     if not fc.empty and len(wk) >= 13:
-        nxt, last = fc["forecast"].sum(), wk["revenue"].tail(13).sum()
+        nxt = fc["forecast"].sum()
+        # Compare with the same weeks last year when available (seasonality), else the last 13 weeks.
+        w = wk.set_index("week")["revenue"]
+        ly = w[(w.index > fc["week"].min() - pd.Timedelta(days=371)) & (w.index <= fc["week"].max() - pd.Timedelta(days=364))]
+        if len(ly) >= 12:
+            last, vs = ly.sum(), "same weeks last year"
+        else:
+            last, vs = wk["revenue"].tail(13).sum(), "last 13 weeks"
         out.append(Insight(
             "forecast", "revenue", "win" if nxt >= last else "risk",
-            f"Next 13 weeks forecast: {m(nxt)} ({'+' if nxt >= last else ''}{pct(nxt / last - 1)} vs last 13)",
+            f"Next 13 weeks forecast: {m(nxt)} ({'+' if nxt >= last else ''}{pct(nxt / last - 1)} vs {vs})",
             f"Holt-Winters forecast on weekly revenue; 80% interval {m(fc['lower'].sum())} - {m(fc['upper'].sum())}.",
             "Use it to set inventory and cash plans; investigate if actuals fall below the lower band.",
             abs(nxt - last) * 0.02, "|forecast change| x 2% (planning value; informational)", 0.5, 1, 2, {},

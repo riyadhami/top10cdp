@@ -91,6 +91,7 @@ src/ecominsights/
 app/streamlit_app.py   UI
 api/main.py            REST API
 scripts/make_sample_data.py   synthetic Shopify + Amazon + cost files with planted patterns
+scripts/fetch_demo_data.py    builds the real-data demo (UCI Online Retail II) into data/demo/
 tests/                 engine and API tests
 ```
 
@@ -168,6 +169,9 @@ IDs, products, more than one channel, a year of history) are skipped.
   same period a year earlier.
 - **KPI tree:** `Revenue = Orders × AOV`, `Orders = Customers × Orders per customer`,
   `AOV = Units per order × Price per unit`.
+- **Comparison base:** when the data reaches back a year, the driver insights, the segment
+  breakdown and the Overview default to the *same period last year*, which removes seasonality.
+  Otherwise they use the previous period.
 - **LMDI decomposition.** Shows how many $ each driver added or removed. The contributions sum
   exactly to the revenue change:
   `contribution(x) = L(R₁, R₀) · ln(x₁ / x₀)`, where `L(a, b) = (a − b) / (ln a − ln b)`.
@@ -204,7 +208,8 @@ IDs, products, more than one channel, a year of history) are skipped.
 ### Products (`products.py`)
 
 - **Pareto/ABC:** class A is the first 80% of revenue, B the next 15%, C the rest.
-- **Momentum:** last 90 days vs the prior 90 days per product.
+- **Momentum:** last 90 days vs the prior 90 days per product, plus vs the same 90 days last year
+  when available. Rising and declining insights use the year-over-year figure.
 - **Basket affinity:** for product pairs in multi-item orders,
   `support = P(A∧B)`, `confidence = P(B|A)`, `lift = P(A∧B) / (P(A)·P(B))`.
 - **Stock-outs.** Time is counted in *open days* (days the store had any order), so closures and
@@ -285,7 +290,8 @@ everything falls back to rule-based output.
 | Q&A chat | same | the same facts, plus the last 6 chat turns |
 
 **Guardrails:**
-- The system prompt restricts the model to numbers in the facts and requires `[insight_id]` citations.
+- The system prompt restricts the model to numbers in the facts, forbids combining numbers itself,
+  and requires `[insight_id]` citations.
 - `verify_numbers` extracts every number in the output (money, %, k/M suffixes) and checks it
   against all numbers in the facts, within rounding. Unmatched numbers are shown as a warning.
 - On any API error, the rule-based narrative is used and the error is surfaced.
@@ -351,6 +357,7 @@ synchronous; this is fine at ≤ 20 MB per file.
 uv sync
 uv run playwright install chromium             # one-time: headless browser for PDF export
 uv run python scripts/make_sample_data.py      # synthetic Shopify + Amazon + product-cost files
+uv run python scripts/fetch_demo_data.py       # real-data demo: UCI Online Retail II (downloads ~45 MB)
 uv run streamlit run app/streamlit_app.py      # UI  -> http://localhost:8501
 uv run uvicorn api.main:app --port 8000        # REST API -> http://localhost:8000/docs
 uv run pytest -q                               # tests

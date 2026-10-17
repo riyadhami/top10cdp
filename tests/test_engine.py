@@ -146,3 +146,19 @@ def test_bgnbd_recovers_simulated_behaviour():
     assert abs(fit["r"] - r) < 0.08 and abs(fit["alpha"] - alpha) < 1.5
     pred = expected_purchases(fit, H, df.x.values, df.t_x.values, df["T"].values).sum()
     assert abs(pred / df.hold.sum() - 1) < 0.2
+
+
+def test_365d_comparison_available_with_two_years_starting_mid_day():
+    d = pd.date_range("2024-10-01 21:05", "2026-09-29 21:05", freq="D")
+    o = pd.DataFrame({"order_date": d, "revenue": 10.0, "units": 1, "customer_key": None, "discount": 0.0,
+                      "gross_revenue": 10.0, "is_returning": False, "order_seq": float("nan")})
+    snap = kpis.snapshot(o)
+    assert snap["365d"]["metrics"]["revenue"]["pop"] is not None
+    assert snap["365d"]["tree"] is not None
+
+
+def test_number_verification_handles_signed_currency_and_period_lengths():
+    facts = {"finding": "Revenue moved -5.5% (-£25.9k). The KPI tree attributes -£34.9k to price.", "aov": 351.41}
+    text = "Revenue fell £25.9k; price cost £34.9k over 180 days and the 365-day view; AOV £351.41."
+    assert verify_numbers(text, facts) == []
+    assert verify_numbers("Revenue was £12.3k.", facts) == ["£12.3k"]
